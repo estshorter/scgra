@@ -8,6 +8,7 @@ I'm afraid that documents are written in Japanese.
 # Example
 [RunCar](./src/RunCar.m)がExampleです。
 最適制御の教科書の例題に載っているような、車の急加速・急停車問題を解くものです。
+入力の上限値に拘束があるため、Bang-Bang解が得られるはずです。
 
 
 # Ref
