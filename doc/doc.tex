@@ -1,0 +1,312 @@
+\documentclass[a4paper]{bxjsarticle}  
+\usepackage{zxjatype}
+\usepackage[ipa]{zxjafont}
+\usepackage{bm}
+\usepackage{amsmath, txfonts}%数式環境がより便利となる。
+
+\newcommand*{\diff}[2]
+{
+	\frac{\mathrm{d}#1}{\mathrm{d}#2}
+}
+
+\title{SCGRAの実装ノート}
+\author{estshorter}
+\date{\today}
+
+\begin{document}
+	\maketitle
+
+	\section{概要}
+	本稿では、SCGRA (Sequential Conjugate Gradient-Restoration Algorithm) のアルゴリズムを概説する。
+
+	\section{SCGRA}
+	SCGRAの特徴は、
+		\begin{enumerate}
+			\item 最適制御問題の本質である非線形二点境界値問題を線形化して容易に解けるようにした点
+			\item 拘束条件を満たすことを主眼においたRestoration Phaseと、拡張目的関数が小さくすることに主眼をおいたConjugate Gradient Phaseの2つのステップによって拘束条件を満たしつつ最適解を求める点
+			\item 汎用性の高さ
+		\end{enumerate}
+	の3つであって、特に汎用性の高さから様々な問題に適用されている。
+	\subsection{表記}
+		\begin{tabular}{ll}
+		$t$ 		 & 正規化時間 $(0\leq t \leq 1)$ \\
+		$\bm{x}(t)$& $n$次元状態ベクトル\\ 
+		$\bm{u}(t)$&  $m$次元入力ベクトル \\ 
+		$\bm{\pi}$& $p$次元パラメータ（終端時間$\tau$を含む） \\ 
+		$\bm{\phi}(\bm{x},\bm{u},\bm{\pi},t)$ &  $n$次元の状態方程式 \\ 
+		$\bm{\psi}(\bm{x},\bm{\pi})$& $q$次元の終端拘束条件 \\ 
+		$\bm{S}(\bm{x},\bm{u},\bm{\pi})$ & $k$次元の等式拘束条件\\
+		$f(\bm{x},\bm{u},\bm{\pi},t)$ & 評価関数の被積分項 \\
+		$g(\bm{x,}\bm{\pi})$ & 終端コスト \\
+		$I$ & 評価関数 \\
+		$J$ & 拡張評価関数 \\
+		$\bm{\lambda}(t) $&$n$次元のラグランジュ乗数 \\
+		$\bm{\rho}(t)$ & $k$次元のラグランジュ乗数\\
+		$\bm{\nu}$ & $q$次元のラグランジュ乗数 \\
+		$P$ & 拘束条件のエラー \\
+		$Q$ & 最適性条件のエラー 
+		\end{tabular} 
+	\subsection{問題設定}
+	問題として、終端時間$\tau$が自由、初期状態は$\bm{x}_0 =\bm{x}_{\text{init}}$に固定、終端時間に拘束条件が課されている場合を考える。
+	$\tau$が自由な最短時間問題だと積分時間が毎回変わってしまい手間なので、
+	実時間$\theta$を正規化した時間$t=\theta/\tau, (0\leq t \leq 1)$を用いることにする。
+	
+	このとき、最小化すべき評価関数は
+	\begin{align}
+		I = \int_{0}^{1}f(\bm{x},\bm{u},\bm{\pi},t)dt + [g(\bm{x},\bm{\pi})]_1
+	\end{align}
+	で、状態方程式は
+	\begin{align}
+		\dot{\bm{x}} - \bm{\phi}(\bm{x},\bm{u},\bm{\pi},t) = 0 \qquad (0\leq t \leq 1) \label{state-eq}
+	\end{align}
+	境界条件は、
+	\begin{align}
+		[\bm{\psi}(\bm{x},\bm{\pi})]_1 = 0 \label{bc}
+	\end{align}
+	等式拘束条件は、
+	\begin{align}
+	\bm{S}(\bm{x},\bm{u},\bm{\pi}) = 0\qquad (0\leq t \leq 1) \label{eqcon}
+	\end{align}
+	となる。
+	
+	拡張評価関数
+	\begin{align}
+		J = \int_{0}^{1}[f(\bm{x},\bm{u},\bm{\pi},t) + \bm{\lambda}(\dot{\bm{x}} - \bm{\phi}) + \bm{\rho}^T \bm{S}]dt + [g(\bm{x},\bm{\pi}) + \bm{\mu}^T \bm{\psi}]_1
+	\end{align}
+	を変分すると最適性の必要条件が次のように得られる。
+	\begin{align}
+		\dot{\bm{\lambda}} - f_x^T + \bm{\phi}^T_x \bm{\lambda}  - \bm{S}_x^T \bm{\rho}  = \dot{\bm{\lambda}} - H_x^T = 0 \qquad (0\leq t \leq 1)\\
+		f_u^T - \bm{\phi}_u^T	 \bm{\lambda + \bm{S}}_u^T \bm{\rho} = H_u^T = 0 \qquad (0\leq t \leq 1)\\
+		\int_{0}^{1}(f_{\pi}^T - \bm{\phi}_\pi^T \bm{\lambda}+\bm{S}^T_{\pi}\bm{\rho})dt + (g_{\pi}^T+\bm{\psi}^T_{\pi}\bm{\mu})_1 =  \int_{0}^{1}H_{\pi}^Tdt + G_{\pi}^T  = 0 \\
+		(\bm{\lambda} + g_x^T + \bm{\psi}_x^T \bm{\mu})_1 = (\bm{\lambda} + G_{x})_1 =  0
+	\end{align}
+	ただし、
+	\begin{align}
+		G&= k_g g + \bm{\mu}^T \bm{\psi}\\
+		H& = k_g f - \bm{\lambda}^T \bm{\phi}+ \bm{\rho}^T  \bm{S}
+	\end{align}
+	とする。今$k_g=1$とするが、詳細については後述する。
+	
+	拘束条件、最適性が満たされているかはそれぞれ次の$P,Q$を計算することで明らかにできるため、これらの値が十分に小さくなるまで計算を行うこととする。
+	\begin{align}
+		P = &\int_{0}^{1} N(\dot{\bm{x}}- \bm{\phi})dt + \int_{0}^{1} N(\bm{S}) dt + N(\bm{\psi})_1 \\		
+		Q = &\int_{0}^{1} N(\dot{\bm{\lambda}} - f_x^T + \bm{\phi}^T_x \bm{\lambda}  - \bm{S}_x^T \bm{\rho} )dt + \int_{0}^{1}(f_u^T - \bm{\phi}_u \bm{\lambda + \bm{S}}_u^T \bm{\rho} ) dt \nonumber \\
+			  &+N\left[\int_{0}^{1}(f_{\pi}^T - \bm{\phi}_\pi^T \bm{\lambda}+\bm{S}^T_{\pi}\bm{\rho})dt + (g_{\pi}^T+\bm{\psi}^T_{\pi}\bm{\mu})_1\right] + N(\bm{\lambda} + g_x^T + \bm{\psi}_x^T \bm{\mu})_1
+	\end{align}
+	ここで、
+	\begin{align}
+		N(\bm{\nu}) = \bm{\nu}^T \bm{\nu}
+	\end{align}
+	である。
+	なお、$P,Q$の右辺第一項のような微分が入った項を計算するには数値微分をせざるを得ず、精度が落ちてしまうために
+	\begin{align}
+		&\int_{0}^{1} N\left[{\bm{x}}- \int_{0}^{t}\bm{\phi}dt_2 - (\bm{x})_0\right]dt \\
+		&\int_{0}^{1} N\left[{\bm{\lambda}} - \int_{0}^{t} (f_x^T + \bm{\phi}^T_x \bm{\lambda}  - \bm{S}_x^T \bm{\rho})dt_2 - (\bm{\lambda})_0 \right]dt
+	\end{align}
+	のようにして計算を行った。
+	
+	\subsection{アルゴリズム\cite{scgra,mugitani,harada}}	
+	本アルゴリズムでは、まず初期解$\bm{x},\bm{u},\bm{\pi}$を与え、そこから少しずつ解を修正していくことで最適解を求める。
+	今、ラグランジュ乗数については
+	\begin{align}
+		\dot{\bm{\lambda}} - H_x^T = 0\\
+		(\bm{\lambda} + G_{x})_1 = 0
+	\end{align}
+	を満たすように求め、制御量、パラメータの修正量を
+	\begin{align}
+		\Delta \bm{u} &= - \alpha H_u^T\\
+		\Delta \bm{\pi} &= - \alpha \left\{\int_{0}^{1}H_\pi dt + (G_\pi)_1 \right\}^T
+	\end{align}
+	とすると、拡張評価関数の第一変分は常に減少特性を示すようになり、数値解は最適解へと近づく。
+	ここで$\alpha$はステップサイズと呼ばれる、解の更新幅を規定する正定数である。
+	
+	次に状態方程式である式\eqref{state-eq}をテイラー展開すると
+	\begin{align}
+		&\dot{\bm{x}}  + \Delta \dot{\bm{x}} - \bm{\phi}  - \bm{\phi}_x\Delta \bm{x}  - \bm{\phi}_\pi \Delta \bm{\pi} -\bm{\phi}_u \Delta \bm{u} \nonumber  = 0\\
+		&\Delta \dot{\bm{x}} - \bm{\phi}_x\Delta \bm{x}  - \bm{\phi}_\pi \Delta \bm{\pi}-\bm{\phi}_u \Delta \bm{u} + (\dot{\bm{x}} - \bm{\phi} )  = 0	
+	\end{align}
+	となる。
+	解を微小に変化させる前に運動方程式が厳密に満たされていれば、上式の左辺第五項は0になるはずだが、本アルゴリズムではこれにエラーを認めて次のように取り扱う。
+	\begin{align}
+		&\Delta \dot{\bm{x}} = \bm{\phi}_x\Delta \bm{x}  + \bm{\phi}_\pi \Delta \bm{\pi}+\bm{\phi}_u \Delta \bm{u} - k_r \alpha (\dot{\bm{x}} - \bm{\phi} )  = 0	
+	\end{align}
+	$k_r=1$であれば、状態方程式が満たされる方向に近づくような$\Delta \dot{\bm{x}}$となる。
+	同様に境界条件（式\eqref{bc}）、拘束条件（式\eqref{eqcon}）についても線形化を行うと
+	\begin{align}
+		(\bm{\psi}_x \Delta \bm{x} + \bm{\psi}_\pi \Delta \bm{\pi} + k_r \alpha \bm{\psi})_1 = 0 \\
+		\bm{S}_x \Delta \bm{x} + \bm{S}_\pi \Delta \bm{\pi} + \bm{S}_u \Delta \bm{u} + k_r \alpha \bm{S} = 0
+	\end{align}
+	が得られる。
+	
+	ここまで導出した式をまとめて
+	\begin{align}
+		\Delta \bm{x}/\alpha = \bm{A}, \quad	\Delta \bm{u} /\alpha= \bm{B}, \quad	\Delta \bm{\pi} /\alpha= \bm{C}
+	\end{align}
+	と置くと、
+	\begin{align}
+		&\dot{\bm{A}} = \bm{\phi}_x \bm{A}  + \bm{\phi}_\pi  \bm{C}+\bm{\phi}_u \bm{B} - k_r (\dot{\bm{x}} - \bm{\phi} ) \label{4.3-1}\\
+		&\dot{\bm{\lambda}} = k_g f_x^T - \bm{\phi}^T_x \bm{\lambda}  + \bm{S}_x^T \bm{\rho} \label{4.3-2} \\
+		&\begin{bmatrix}
+		\bm{I}_{m\times m}& \bm{S}_u^T\\ 
+		\bm{S}_u&  0_{k\times k}
+		\end{bmatrix} \begin{bmatrix}
+		\bm{B}\\ 
+		\bm{\rho}
+		\end{bmatrix} = - \begin{bmatrix}
+		k_gf_u^T -\bm{\phi}_u^T \lambda\\ 
+		k_r \bm{S} + \bm{S}_x \bm{A} + \bm{S}_\pi \bm{C}
+		\end{bmatrix}  \label{4.3-3}\\
+		&(\bm{\psi}_x \bm{A} + \bm{\psi}_\pi \bm{C} + k_r\bm{\psi})_1 = 0 \label{4.3-4}\\
+		&\bm{C} = -\left\{ \int_{0}^{1}(k_g f_\pi^T - \bm{\phi}_\pi^T \bm{\lambda} + \bm{S}_\pi^T \bm{\rho})dt + (k_g g_\pi^T + \bm{\psi}_\pi^T \bm{\mu})_1  \right\}\\
+		&(\bm{\lambda} + g_x^T + \bm{\psi}_x^T \bm{\mu})_1  = 0 \label{4.3-6}
+	\end{align}
+	が得られる。$\bm{A}$の初期値を0とし、$(\bm{\lambda})_0$と$\bm{C}$を適当な値に仮定すると、式\eqref{4.3-1}～\eqref{4.3-3}から$\bm{A},\bm{B},\bm{C},\bm{\lambda},\bm{\rho}$を計算できることがわかる。
+	
+	式を全て線形化した意味がここで生きてくる。$(\bm{\lambda})_0$と$\bm{C}$をまとめたベクトル
+	\begin{align}
+		\bm{w} = \begin{bmatrix}
+		(\bm{\lambda})_0\\ 
+		\bm{C}
+		\end{bmatrix}
+	\end{align}
+	の自由度は$n+p$個であって、方程式が全て線型化されていることから、特解を含め$n+p+1$個の解の重ねあわせで$\bm{A},\bm{B},\bm{C},\bm{\lambda},\bm{\rho}$を表すことができる。
+	$i$個目の解を$\bm{A}_i$などとおき、その初期値となる$\bm{w}$の$j$番目の要素は次のようにする。
+	\begin{align}
+		w_j = \delta_{ij}
+	\end{align}
+	ここでクロネッカーのデルタを用いた。
+	このとき、
+	\begin{align}
+		\bm{A} = \Sigma k_i \bm{A}_i,\quad \bm{B} = \Sigma k_i \bm{B}_i,\quad&\bm{C} = \Sigma k_i \bm{C}_i,\quad \bm{\lambda} = \Sigma k_i \bm{\lambda}_i,\quad\bm{\rho} = \Sigma k_i \bm{\rho}_i \\
+		&\Sigma k_i = 1
+	\end{align}
+	となる。$k_i$と$q$個の$\bm{\mu}$は、式\eqref{4.3-4}～\eqref{4.3-6}を満たすように選べば良い。
+	すなわち、以下の式を解けば求まる。
+	\begin{align}
+		\begin{bmatrix}
+		(\bm{\psi}_x \bm{A}_1 + \bm{\psi}_\pi \bm{C}_1)_1 & \cdots & (\bm{\psi}_x \bm{A}_{n+p+1} + \bm{\psi}_\pi \bm{C}_{n+p+1})_1 & 0_{n\times q} \\ 
+		\bm{C}_1 + \int_{0}^{1}(-\bm{\phi}_\pi^T \bm{\lambda}_1 + \bm{S}_\pi^T \bm{\rho})dt& \cdots & \bm{C}_{n+p+1} + \int_{0}^{1}(-\bm{\phi}_\pi^T \bm{\lambda}_{n+p+1} + \bm{S}_\pi^T \bm{\rho})dt & (\bm{\psi}_\pi^T)_1  \\ 
+		(\bm{\lambda}_1)_1& \cdots & (\bm{\lambda}_{n+p+1})_{1} & (\bm{\psi}_x^T)_1  \\ 
+		1& \cdots & 1 &0_{1\times q}
+		\end{bmatrix} \begin{bmatrix}
+		k_1 \\ 
+		\vdots\\ 
+		k_{n+p+1}  \\ 
+		\mu_1 \\ 
+		\vdots \\ 
+		\mu_q
+		\end{bmatrix}
+		= \begin{pmatrix}
+		-k_r (\bm{\psi})_1 \\ 
+		-k_g \left[\int\limits_{0}^{1}f_\pi^Tdt  + (g_\pi^T)_1\right]\\ 
+		-(g_x^T)_1\\ 
+		1_{1\times 1}
+		\end{pmatrix} 
+	\end{align}
+	
+	こうして$\bm{A},\bm{B},\bm{C},\bm{\lambda},\bm{\rho},\bm{\nu}$が計算できる。
+	最後にステップサイズ$\alpha$を決定して修正量を決定する。
+	
+	SCGRA法の特徴で述べたように、同アルゴリズムにはRestoration PhaseとConjugate Gradient Phaseが存在する。
+	Restoration Phaseでは、$k_g = 0, k_r=1$として得た修正量で、本来の評価関数は無視しながら、拘束条件のみを満たそうとする。
+	このとき、ステップサイズは$\alpha = 1$から二分法で決定する。
+	さらに、$P$が小さくなるまで何回もRestoration Phaseを繰り返す。
+	一方のConjugate Gradient Phaseでは$k_g=1, k_r=0$として、評価関数を小さくすることのみに注力する。
+	ステップサイズは、拡張評価関数が最小となるよう$0<\alpha\leq 1$の範囲で黄金分割法を使って求める（原論文では、3次の補間で求めていたが、なんでも良いと思われる）。
+	この2つのフェイズを繰り返し、$P,Q$が十分に小さくなれば計算終了である。
+	
+	\section{初期状態自由の条件がある場合}
+	状態の一部に初期状態自由のものがある場合でもほぼやり方は同じである。
+	$A_i$の初期値が0でない点と、初期拘束条件に対するラグランジュ乗数も$n+p+1$回の積分結果の重ねあわせで表わされることにさえ注意すればよい。
+	以下に式を羅列する。
+	状態ベクトルのうち、初期状態自由のものを$b$次元ベクトル$\bm{z$}とおき、初期拘束条件は$c$次元ベクトル$\bm{\omega}(\bm{z},\bm{\pi})$、それに対するラグランジュ乗数は$\bm{\sigma}$、状態方程式に対するラグランジュ乗数は$\bm{\zeta}$とおいた。
+	\begin{align}
+	&I = \int_{0}^{1}f(\bm{x},\bm{u},\bm{\pi},t)dt + [h(\bm{z},\bm{\pi})]_0+ [g(\bm{x},\bm{\pi})]_1\\
+	&J = \int_{0}^{1}[f(\bm{x},\bm{u},\bm{\pi},t) + \bm{\lambda}(\dot{\bm{x}} - \bm{\phi}) + \bm{\rho}^T \bm{S}]dt + [h(\bm{z},\bm{\pi}) + \bm{\sigma}^T \bm{\omega}]_0 + [g(\bm{x},\bm{\pi}) + \bm{\mu}^T \bm{\psi}]_1\\
+	&\dot{\bm{x}} - \bm{\phi}(\bm{x},\bm{u},\bm{\pi},t) = 0 \qquad (0\leq t \leq 1)\\
+	&[\bm{\omega}(\bm{z},\bm{\pi})]_0 = 0 \\
+	&[\bm{\psi}(\bm{x},\bm{\pi})]_1 = 0 \\
+	&\bm{S}(\bm{x},\bm{u},\bm{\pi}) = 0\qquad (0\leq t \leq 1)\\
+	&\begin{bmatrix}
+	 (\bm{\omega}_z)_0& 0_{c\times c} \\ 
+	 1_{b\times b}& (\bm{\omega}_z)_0^T
+	 \end{bmatrix} \begin{bmatrix}
+	 \bm{E}(0)\\ 
+	 \bm{\sigma}
+	 \end{bmatrix} = \begin{bmatrix}
+	 (-\bm{\omega}_\pi \bm{C}- k_r\bm{\omega)}_0\\
+	 (\bm{\zeta}-k_g h_z)_0
+	 \end{bmatrix} \quad \text{where} \quad \bm{E} = \Delta \bm{z} / \alpha\\
+	&\dot{\bm{A}} = \bm{\phi}_x \bm{A}  + \bm{\phi}_\pi  \bm{C}+\bm{\phi}_u \bm{B} - k_r (\dot{\bm{x}} - \bm{\phi} ) \\
+	&\dot{\bm{\lambda}} = k_g f_x^T - \bm{\phi}^T_x \bm{\lambda}  + \bm{S}_x^T \bm{\rho}  \\
+	&\begin{bmatrix}
+	\bm{I}_{m\times m}& \bm{S}_u^T\\ 
+	\bm{S}_u&  0_{k\times k}
+	\end{bmatrix} \begin{bmatrix}
+	\bm{B}\\ 
+	\bm{\rho}
+	\end{bmatrix} = - \begin{bmatrix}
+	k_gf_u^T -\bm{\phi}_u^T \lambda\\ 
+	k_r \bm{S} + \bm{S}_x \bm{A} + \bm{S}_\pi \bm{C}
+	\end{bmatrix} \\
+	&(\bm{\psi}_x \bm{A} + \bm{\psi}_\pi \bm{C} + k_r\bm{\psi})_1 = 0 \\
+	&\bm{C} = -\left\{ \int_{0}^{1}(k_g f_\pi^T - \bm{\phi}_\pi^T \bm{\lambda} + \bm{S}_\pi^T \bm{\rho})dt +  (k_g h_\pi^T + \bm{\omega}_\pi^T \bm{\sigma})_0+ (k_g g_\pi^T + \bm{\psi}_\pi^T \bm{\mu})_1  \right\}\\
+	&(\bm{\lambda} + g_x^T + \bm{\psi}_x^T \bm{\mu})_1  = 0 
+	\end{align}
+	\begin{align}
+	&\begin{bmatrix}
+	(\bm{\psi}_x \bm{A}_1 + \bm{\psi}_\pi \bm{C}_1)_1 & \cdots & (\bm{\psi}_x \bm{A}_{n+p+1} + \bm{\psi}_\pi \bm{C}_{n+p+1})_1 & 0_{n\times q} \\ 
+	\bm{C}_1 + \int_{0}^{1}(-\bm{\phi}_\pi^T \bm{\lambda}_1 + \bm{S}_\pi^T \bm{\rho})dt +  (\bm{\omega}_\pi^T \bm{\sigma}_1)_0 & \cdots & \bm{C}_{n+p+1} + \int_{0}^{1}(-\bm{\phi}_\pi^T \bm{\lambda}_{n+p+1} + \bm{S}_\pi^T \bm{\rho})dt +  (\bm{\omega}_\pi^T \bm{\sigma}_{n+p+1})_0 & (\bm{\psi}_\pi^T)_1  \\ 
+	(\bm{\lambda}_1)_1& \cdots & (\bm{\lambda}_{n+p+1})_{1} & (\bm{\psi}_x^T)_1  \\ 
+	1& \cdots & 1 &0_{1\times q}
+	\end{bmatrix} \begin{bmatrix}
+	k_1 \\ 
+	\vdots\\ 
+	k_{n+p+1}  \\ 
+	\mu_1 \\ 
+	\vdots \\ 
+	\mu_q
+	\end{bmatrix} \nonumber \\
+	&= \begin{pmatrix}
+	-k_r (\bm{\psi})_1 \\ 
+	-k_g \left[\int\limits_{0}^{1}f_\pi^Tdt +  (h_\pi^T)_0 + (g_\pi^T)_1\right]\\ 
+	-(g_x^T)_1\\ 
+	1_{1\times 1}
+	\end{pmatrix} 
+	\end{align}	
+		\begin{align}
+		P = &\int_{0}^{1} N(\dot{\bm{x}}- \bm{\phi})dt + \int_{0}^{1} N(\bm{S}) dt + N(\bm{\omega})_0  + N(\bm{\psi})_1 \\		
+		Q = &\int_{0}^{1} N(\dot{\bm{\lambda}} - f_x^T + \bm{\phi}^T_x \bm{\lambda}  - \bm{S}_x^T \bm{\rho} )dt + \int_{0}^{1}(f_u^T - \bm{\phi}_u \bm{\lambda + \bm{S}}_u^T \bm{\rho} ) dt \nonumber \\
+		&+N\left[\int_{0}^{1}(f_{\pi}^T - \bm{\phi}_\pi^T \bm{\lambda}+\bm{S}^T_{\pi}\bm{\rho})dt + (h_{\pi}^T+\bm{\omega}^T_{\pi}\bm{\mu})_0 + (g_{\pi}^T+\bm{\psi}^T_{\pi}\bm{\mu})_1\right] \nonumber \\
+		&+ N(\bm{\zeta} + h_z^T + \bm{\omega}_z^T \bm{\sigma})_0 + N(\bm{\lambda} + g_x^T + \bm{\psi}_x^T \bm{\mu})_1
+		\end{align}
+	\section{補遺}
+	SCGRAにおける線型二点境界値問題の解き方が疑問だったので、以下の簡単な問題について一例を示す。
+	\begin{align}
+		\diff{y}{x} = u,\quad
+		\diff{u}{x} = x\qquad
+		\text{s.t.} \quad y(0) = y_0, \quad y(1) = y_1 \label{eq:hoi1}
+	\end{align}
+	$y,u$がスカラーだとすると、この問題の自由度は、$u(0)$の選び方の1自由度のみとなる。
+	非同次の方程式だから、解は特解1個を含めて2個の数値解の線型結合で次のように表される（特解の存在によって自由度が増えることは無条件に認めた）。
+	\begin{align}
+		y = k_1 y_a + k_2 y_b\\
+		u = k_1 u_a + k_2 u_b
+	\end{align}
+	これらを式\eqref{eq:hoi1}へ代入すると
+	\begin{align}
+	&k_1 \left(\diff{y_a}{x} -u_a \right) + k_2 \left(\diff{y_b}{x} -u_b\right)= 0 \\
+	&k_1 \diff{u_a}{x} + k_2 \diff{u_b}{x}= k_1 x + k_2 x  = x \label{eq:hoi2}
+	\end{align}
+	が得られる。式\eqref{eq:hoi2}より
+	\begin{align}
+	(k_1+k_2) = 1
+	\end{align}
+	となって確かに$k_i$の総和の条件が出てくる。
+	\begin{thebibliography}{9}
+		\bibitem{scgra} A.K.Wu and A.Miele, "Sequential conjugate gradient-restoration algorithm for optimal control problems with non-differential constraints and general boundary conditions, part I", Optimal Control Applications and Methods, Volume 1, Issue 1, January/March 1980, pp.69--88
+		\bibitem{mugitani} 麥谷高志、"状態量不等式拘束を伴う最適問題の数値解法に関する研究"、東京大学博士論文、1996			
+		\bibitem{harada} 原田正範、"最適制御問題による地面付近における滑空機の距離最大飛行の解析に関する研究"、東海大学博士論文、1996
+
+	\end{thebibliography}
+\end{document}
