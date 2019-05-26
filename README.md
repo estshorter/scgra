@@ -1,7 +1,8 @@
 # scgra
-MATLAB implementation of SCGRA (Sequential Conjugate Gradient-Restoration Algorithm)
+This reposity provides MATLAB implementation of SCGRA (Sequential Conjugate Gradient-Restoration Algorithm).
+I'm afraid that documents are written in Japanese.
 
-
+最適制御の数値解法の一つである、SCGRA (Sequential Conjugate Gradient-Restoration Algorithm)のMATLAB実装を公開します。
 
 # Ref
 1. A.K.Wu and A.Miele, "Sequential conjugate gradient-restoration algorithm for optimal control problems with non-differential constraints and general boundary conditions, part I", Optimal Control Applications and Methods, Volume 1, Issue 1, January/March 1980, pp.69--88
